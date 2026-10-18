@@ -5,6 +5,7 @@ section .text
 bits 32
 start:
 	mov esp, stack_top
+	mov edi, ebx ; keep multiboot2 info pointer, passed to kernel_main (rdi)
 
 	call check_multiboot
 	call check_cpuid

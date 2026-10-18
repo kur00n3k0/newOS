@@ -1,7 +1,8 @@
 #include "print.h"
+#include "io.h"
 
-const static size_t NUM_COLS = 80;
-const static size_t NUM_ROWS = 25;
+static const size_t NUM_COLS = 80;
+static const size_t NUM_ROWS = 25;
 
 struct Char {
     uint8_t character;
@@ -24,10 +25,21 @@ void clear_row(size_t row) {
     }
 }
 
+static void update_cursor() {
+    uint16_t pos = (uint16_t) (col + NUM_COLS * row);
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t) (pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t) (pos >> 8));
+}
+
 void print_clear() {
     for (size_t i = 0; i < NUM_ROWS; i++) {
         clear_row(i);
     }
+    col = 0;
+    row = 0;
+    update_cursor();
 }
 
 void print_newline() {
@@ -45,16 +57,42 @@ void print_newline() {
         }
     }
 
-    clear_row(NUM_COLS - 1);
+    clear_row(NUM_ROWS - 1);
 }
 
 void print_char(char character) {
     if (character == '\n') {
         print_newline();
+        update_cursor();
         return;
     }
 
-    if (col > NUM_COLS) {
+    if (character == '\r') {
+        col = 0;
+        update_cursor();
+        return;
+    }
+
+    if (character == '\b') {
+        if (col > 0) {
+            col--;
+            buffer[col + NUM_COLS * row] = (struct Char) {
+                character: ' ',
+                color: color,
+            };
+        }
+        update_cursor();
+        return;
+    }
+
+    if (character == '\t') {
+        do {
+            print_char(' ');
+        } while (col % 8 != 0);
+        return;
+    }
+
+    if (col >= NUM_COLS) {
         print_newline();
     }
 
@@ -64,6 +102,7 @@ void print_char(char character) {
     };
 
     col++;
+    update_cursor();
 }
 
 void print_str(char* str) {

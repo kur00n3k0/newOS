@@ -3,6 +3,7 @@ ENTRY(start)
 SECTIONS
 {
     . = 1M;
+    _kernel_start = .;
 
     .boot :
     {
@@ -11,6 +12,29 @@ SECTIONS
 
     .text :
     {
-        *(.text)
+        *(.text .text.*)
+    }
+
+    .rodata :
+    {
+        *(.rodata .rodata.*)
+    }
+
+    .data :
+    {
+        *(.data .data.*)
+    }
+
+    .bss :
+    {
+        *(COMMON)
+        *(.bss .bss.*)
+    }
+
+    _kernel_end = .;
+
+    /DISCARD/ :
+    {
+        *(.eh_frame .comment .note.*)
     }
 }
