@@ -5,6 +5,7 @@
 #include "pit.h"
 #include "pmm.h"
 #include "heap.h"
+#include "fs.h"
 #include "string.h"
 #include "io.h"
 #include <stdint.h>
@@ -40,11 +41,143 @@ static void cmd_clear(int argc, char** argv) {
     print_clear();
 }
 
+static void fs_fail(const char* cmd, const char* arg, int err) {
+    kprintf("%s: %s: %s\n", cmd, arg, fs_strerror(err));
+}
+
 static void cmd_echo(int argc, char** argv) {
+    // echo text... [> file | >> file]
+    int words = argc;
+    int append = 0;
+    const char* target = NULL;
+
     for (int i = 1; i < argc; i++) {
-        kprintf("%s%s", i > 1 ? " " : "", argv[i]);
+        if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
+            if (i + 1 >= argc) {
+                kprintf("echo: missing file after %s\n", argv[i]);
+                return;
+            }
+            append = argv[i][1] == '>';
+            target = argv[i + 1];
+            words = i;
+            break;
+        }
     }
-    kprintf("\n");
+
+    if (!target) {
+        for (int i = 1; i < words; i++) {
+            kprintf("%s%s", i > 1 ? " " : "", argv[i]);
+        }
+        kprintf("\n");
+        return;
+    }
+
+    struct fs_node* file;
+    int err = fs_create(target, &file);
+    if (err) {
+        fs_fail("echo", target, err);
+        return;
+    }
+    if (!append) {
+        file->size = 0;
+    }
+    for (int i = 1; i < words; i++) {
+        if (i > 1) {
+            fs_write(file, " ", 1, 1);
+        }
+        err = fs_write(file, argv[i], strlen(argv[i]), 1);
+        if (err) {
+            fs_fail("echo", target, err);
+            return;
+        }
+    }
+    fs_write(file, "\n", 1, 1);
+}
+
+static void cmd_pwd(int argc, char** argv) {
+    (void) argc; (void) argv;
+    char path[128];
+    fs_path(fs_cwd(), path, sizeof(path));
+    kprintf("%s\n", path);
+}
+
+static void cmd_cd(int argc, char** argv) {
+    const char* path = argc > 1 ? argv[1] : "/";
+    int err = fs_chdir(path);
+    if (err) {
+        fs_fail("cd", path, err);
+    }
+}
+
+static void cmd_ls(int argc, char** argv) {
+    const char* path = argc > 1 ? argv[1] : ".";
+    struct fs_node* n;
+    int err = fs_lookup(path, &n);
+    if (err) {
+        fs_fail("ls", path, err);
+        return;
+    }
+    if (n->type == FS_FILE) {
+        kprintf("%s  %lu bytes\n", n->name, (uint64_t) n->size);
+        return;
+    }
+    if (!n->child) {
+        return;
+    }
+    for (struct fs_node* c = n->child; c; c = c->next) {
+        if (c->type == FS_DIR) {
+            print_set_color(PRINT_COLOR_LIGHT_CYAN, PRINT_COLOR_BLACK);
+            kprintf("%s/\n", c->name);
+            print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
+        } else {
+            kprintf("%-28s %lu bytes\n", c->name, (uint64_t) c->size);
+        }
+    }
+}
+
+static void cmd_mkdir(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        int err = fs_mkdir(argv[i]);
+        if (err) {
+            fs_fail("mkdir", argv[i], err);
+        }
+    }
+}
+
+static void cmd_touch(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        struct fs_node* n;
+        int err = fs_create(argv[i], &n);
+        if (err) {
+            fs_fail("touch", argv[i], err);
+        }
+    }
+}
+
+static void cmd_cat(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        struct fs_node* n;
+        int err = fs_lookup(argv[i], &n);
+        if (!err && n->type != FS_FILE) {
+            err = FS_EISDIR;
+        }
+        if (err) {
+            fs_fail("cat", argv[i], err);
+            continue;
+        }
+        for (size_t k = 0; k < n->size; k++) {
+            print_char((char) n->data[k]);
+        }
+    }
+}
+
+static void cmd_rm(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        int err = fs_remove(argv[i]);
+        if (err) {
+            fs_fail("rm", argv[i], err);
+        }
+    }
 }
 
 static void cmd_uptime(int argc, char** argv) {
@@ -130,7 +263,14 @@ static void cmd_halt(int argc, char** argv) {
 static const struct command commands[] = {
     { "help",     "list commands", cmd_help },
     { "clear",    "clear the screen", cmd_clear },
-    { "echo",     "print arguments", cmd_echo },
+    { "echo",     "echo text [> file | >> file]", cmd_echo },
+    { "ls",       "ls [path]: list a directory", cmd_ls },
+    { "cd",       "cd [path]: change directory", cmd_cd },
+    { "pwd",      "print working directory", cmd_pwd },
+    { "mkdir",    "mkdir <dir>...: create directories", cmd_mkdir },
+    { "touch",    "touch <file>...: create empty files", cmd_touch },
+    { "cat",      "cat <file>...: print file contents", cmd_cat },
+    { "rm",       "rm <path>...: remove files or empty dirs", cmd_rm },
     { "uptime",   "time since boot", cmd_uptime },
     { "mem",      "physical memory and heap usage", cmd_mem },
     { "alloc",    "alloc [bytes]: kmalloc/kfree smoke test", cmd_alloc },
@@ -199,7 +339,9 @@ void shell_run(void) {
     char line[LINE_MAX];
     for (;;) {
         print_set_color(PRINT_COLOR_LIGHT_GREEN, PRINT_COLOR_BLACK);
-        kprintf("newOS> ");
+        char cwd[128];
+        fs_path(fs_cwd(), cwd, sizeof(cwd));
+        kprintf("newOS:%s> ", cwd);
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
         read_line(line);
         execute(line);
